@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pycryptodome==3.21.0
+python-multipart==0.0.20
+weasyprint==60.0
+pydyf==0.8.0
+markdown
+matplotlib
+mcp[cli]>=1.9.0

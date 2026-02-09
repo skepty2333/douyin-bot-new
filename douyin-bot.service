@@ -1,0 +1,18 @@
+[Unit]
+Description=Douyin Video Summarizer Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/douyin-bot
+EnvironmentFile=/root/douyin-bot/.env
+ExecStart=/usr/bin/python3.8 -m uvicorn main:app --host 0.0.0.0 --port 8080
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

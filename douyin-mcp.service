@@ -1,0 +1,20 @@
+[Unit]
+Description=Douyin Knowledge MCP Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/douyin-bot
+EnvironmentFile=/root/douyin-bot/.env
+Environment=KNOWLEDGE_DB_PATH=/root/douyin-bot/knowledge.db
+Environment=MCP_PORT=8090
+ExecStart=/usr/bin/python3.11 mcp_server.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
