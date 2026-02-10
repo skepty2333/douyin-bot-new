@@ -48,7 +48,7 @@ douyin-bot/
 - **企业微信 SDK**: `WeChatCrypto` (回调加解密)
 - **音频处理**: `yt-dlp` (下载), `ffmpeg` (转换/切片)
 - **AI 模型**:
-    - **Stage 1 (听录)**: Google Gemini 3 Pro Preview (via UIUIAPI)
+    - **Stage 1 (听录)**: Google Gemini 3 Pro Preview (via UIUIAPI, 支持自动故障切换)
     - **Stage 2 (研究)**: Alibaba Qwen-Max (via Aliyun DashScope, 支持联网搜索)
     - **Stage 3 (总结)**: Claude 4.5 Sonnet (Thinking) (via UIUIAPI, 支持自动故障切换)
 - **PDF 生成**: `markdown` + `WeasyPrint` (CSS排版, LaTeX支持)
@@ -138,7 +138,7 @@ sudo firewall-cmd --reload
    - 添加新的 MCP Server:
      - Name: `Douyin Knowledge`
      - Type: `sse`
-     - URL: `https://xyz.trycloudflare.com/sse`
+     - URL: `https://xyz.trycloudflare.com/mcp`
 
 3. **使用**:
    在 Claude 对话中输入 "Search for video about [topic]" 即可调用知识库。
