@@ -12,19 +12,22 @@ CORP_SECRET = os.getenv("CORP_SECRET", "your_corp_secret")
 CALLBACK_TOKEN = os.getenv("CALLBACK_TOKEN", "your_callback_token")
 CALLBACK_AES_KEY = os.getenv("CALLBACK_AES_KEY", "your_encoding_aes_key")
 
-# ========================
-# AI API 配置 (uiuiapi 聚合平台)
-# ========================
-# 通用 API 端点
+# 副站 API 配置
 API_BASE_URL = os.getenv("API_BASE_URL", "https://sg.uiuiapi.com/v1")
+SECONDARY_API_BASE_URL = os.getenv("SECONDARY_API_BASE_URL", "https://api1.uiuiapi.com/v1")
+SECONDARY_GEMINI_API_KEY = os.getenv("SECONDARY_GEMINI_API_KEY", "")
+SECONDARY_GEMINI_MODEL = os.getenv("SECONDARY_GEMINI_MODEL", "gemini-3-pro-preview-thinking")
+SECONDARY_SONNET_API_KEY = os.getenv("SECONDARY_SONNET_API_KEY", "")
+SECONDARY_SONNET_MODEL = os.getenv("SECONDARY_SONNET_MODEL", "claude-sonnet-4-5-20250929-thinking")
 
 # 阶段1: Gemini - 初始转写+总结
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your_gemini_api_key")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-pro-preview-thinking-512")
 
-# 阶段2: DeepSeek Reasoner - 深度审视与提问
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "your_deepseek_api_key")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v3.2-thinking")
+# 阶段2: Qwen (DashScope) - 深度思考与联网搜索
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "your_dashscope_api_key")
+QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen-max")
+QWEN_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # 阶段3: Sonnet 4.5 - 联网搜索 + 最终交付
 SONNET_API_KEY = os.getenv("SONNET_API_KEY", "your_sonnet_api_key")

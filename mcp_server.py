@@ -45,7 +45,7 @@ async def search_notes(params: SearchInput) -> str:
             f"- **视频码**: `{r['video_code']}`\n"
             f"- **作者**: {r['author']}\n"
             f"- **标签**: {r['tags'][:100]}\n"
-            f"- **时间**: {r['created_at'][:10]}\n"
+            f"- **时间**: {r.get('timestamp') or r['created_at'][:19]}\n"
             f"- **摘要**: {r.get('snippet', '')[:200]}\n"
         )
     lines.append("\n> 💡 使用 `get_note` (ID) 或 `get_note_by_code` (视频码) 获取完整内容。")
@@ -70,7 +70,7 @@ async def get_note(params: GetNoteInput) -> str:
         f"- **作者**: {entry['author']}\n"
         f"- **来源**: {entry['source_url']}\n"
         f"- **标签**: {entry['tags']}\n"
-        f"- **创建时间**: {entry['created_at']}\n"
+        f"- **创建时间**: {entry.get('timestamp') or entry['created_at']}\n"
     )
     if entry.get('user_requirement'):
         header += f"- **用户要求**: {entry['user_requirement']}\n"
@@ -91,7 +91,7 @@ async def get_note_by_code(video_code: str) -> str:
         f"- **作者**: {entry['author']}\n"
         f"- **来源**: {entry['source_url']}\n"
         f"- **标签**: {entry['tags']}\n"
-        f"- **创建时间**: {entry['created_at']}\n"
+        f"- **创建时间**: {entry.get('timestamp') or entry['created_at']}\n"
     )
     if entry.get('user_requirement'):
         header += f"- **用户要求**: {entry['user_requirement']}\n"
@@ -117,7 +117,7 @@ async def list_notes(params: ListNotesInput) -> str:
     for n in notes:
         lines.append(
             f"- **[{n['id']}]** `{n['video_code']}` {n['title']} — _{n['author']}_ "
-            f"({n['created_at'][:10]})"
+            f"({(n.get('timestamp') or n['created_at'])[:10]})"
         )
         if n['tags']:
             lines.append(f"  标签: {n['tags'][:80]}")
@@ -142,7 +142,7 @@ async def list_by_tag(params: TagFilterInput) -> str:
     for n in notes:
         lines.append(
             f"- **[{n['id']}]** {n['title']} — _{n['author']}_ "
-            f"({n['created_at'][:10]})"
+            f"({(n.get('timestamp') or n['created_at'])[:10]})"
         )
     return "\n".join(lines)
 

@@ -42,18 +42,18 @@ douyin-bot/
 └── knowledge.db             # 知识库文件 (自动生成)
 ```
 
-## 技术选型
+## 🛠️ 技术选型
 
-| 环节 | 方案 | 说明 |
-|------|------|------|
-| 抖音解析 | **HTTP + 移动端UA** | 轻量级，无需浏览器 |
-| 音频提取 | **ffmpeg** | 成熟稳定 |
-| 阶段1 - 转写 | **Gemini** | 多模态音频理解 |
-| 阶段2 - 审视 | **DeepSeek Reasoner** | 深度思考，提出补充问题 |
-| 阶段3 - 增强 | **Sonnet 4.5** | 联网搜索，补充背景知识 |
-| PDF 生成 | **WeasyPrint** | 纯 Python，支持 CSS |
-| 公式渲染 | **Matplotlib** | 高质量 LaTeX 渲染 |
-| Web 框架 | **FastAPI** | 异步原生 |
+- **Web 框架**: FastAPI (Python 3.11)
+- **企业微信 SDK**: `WeChatCrypto` (回调加解密)
+- **音频处理**: `yt-dlp` (下载), `ffmpeg` (转换/切片)
+- **AI 模型**:
+    - **Stage 1 (听录)**: Google Gemini 3 Pro Preview (via UIUIAPI)
+    - **Stage 2 (研究)**: Alibaba Qwen-Max (via Aliyun DashScope, 支持联网搜索)
+    - **Stage 3 (总结)**: Claude 4.5 Sonnet (Thinking) (via UIUIAPI, 支持自动故障切换)
+- **PDF 生成**: `markdown` + `WeasyPrint` (CSS排版, LaTeX支持)
+- **数据存储**: SQLite + JSON (简单高效)
+- **任务队列**: `asyncio` 原生协程 (轻量级并发)
 
 ## 部署
 
@@ -74,11 +74,30 @@ chmod +x scripts/setup.sh && ./scripts/setup.sh
 
 ### 3. 配置环境变量
 
+复制 `.env.example` (参考下文) 到 `.env` 并填入配置：
+
 ```bash
-cp .env.example .env
-nano .env
+# 企业微信配置
+CORP_ID=your_corp_id
+AGENT_ID=1000002
+CORP_SECRET=your_secret
+CALLBACK_TOKEN=your_token
+CALLBACK_AES_KEY=your_aes_key
+
+# API 配置 (UIUIAPI)
+API_BASE_URL=https://sg.uiuiapi.com/v1
+GEMINI_API_KEY=sk-...
+SONNET_API_KEY=sk-...
+
+# API 副站配置 (Failover)
+SECONDARY_API_BASE_URL=https://api1.uiuiapi.com/v1
+SECONDARY_GEMINI_API_KEY=sk-...
+SECONDARY_SONNET_API_KEY=sk-...
+
+# Qwen 配置 (DashScope)
+DASHSCOPE_API_KEY=sk-...
+QWEN_MODEL=qwen-max
 ```
-务必配置：企业微信参数、AI API Key (Gemini/DeepSeek/Sonnet)。
 
 ### 4. 启动服务
 

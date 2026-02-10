@@ -375,10 +375,10 @@ def generate_pdf(markdown_content: str, output_path: str, author: str = "") -> b
         )
 
         # 插入作者信息到 HTML
-        if author:
+        # if author:
             # 在第一个 h1 后面或者是开头插入作者
             # 简单起见，直接在 body 开头加一个 subtitle
-            html_content = f'<div class="author-info">Author: {author}</div>\n{html_content}'
+            # html_content = f'<div class="author-info">Author: {author}</div>\n{html_content}'
 
         full_html = f"""<!DOCTYPE html>
 <html lang="zh-CN">

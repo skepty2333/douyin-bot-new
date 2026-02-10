@@ -395,7 +395,7 @@ async def _execute_summary_task(user_id: str, task: PendingTask, reuse_video_cod
         pdf_path = os.path.join(TEMP_DIR, f"{video_id}_summary.pdf")
         pdf_success = False
         try:
-            if generate_pdf(summary, pdf_path, author=task.parsed_author):
+            if generate_pdf(summary, pdf_path):
                 media_id = await upload_temp_media(pdf_path, "file")
                 await _send_file_message(user_id, media_id)
                 pdf_success = True

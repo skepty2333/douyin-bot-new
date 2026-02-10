@@ -8,3 +8,5 @@ pydyf==0.8.0
 markdown
 matplotlib
 mcp[cli]>=1.9.0
+openai>=1.0.0
+duckduckgo-search>=5.0.0
