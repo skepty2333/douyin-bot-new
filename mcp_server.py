@@ -333,7 +333,6 @@ if __name__ == "__main__":
         print("MCP Server 启动 (stdio 模式)", file=sys.stderr)
         mcp.run(transport="stdio")
     else:
-    else:
-        print(f"MCP Server 启动 (SSE 模式) → http://0.0.0.0:{port}/sse", file=sys.stderr)
-        mcp.run(transport="sse")
+        print(f"MCP Server 启动 (Streamable HTTP) → http://0.0.0.0:{port}/mcp", file=sys.stderr)
+        mcp.run(transport="streamable-http")
 
