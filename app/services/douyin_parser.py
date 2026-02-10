@@ -81,7 +81,7 @@ async def resolve_and_download(share_url: str) -> dict:
                 video_info = loader_data.get("video_(id)/page", {}).get("videoInfoRes") or \
                              loader_data.get("note_(id)/page", {}).get("videoInfoRes")
                 
-                if video_info:
+                if video_info and "item_list" in video_info and video_info["item_list"]:
                     item = video_info["item_list"][0]
                     title = item.get("desc", title)
                     author = item.get("author", {}).get("nickname", author)
@@ -92,7 +92,7 @@ async def resolve_and_download(share_url: str) -> dict:
                              video_url = url_list[0].replace("playwm", "play")
                              if video_url.startswith("//"): video_url = "https:" + video_url
                 else:
-                    logger.warning("JSON中未找到 videoInfoRes")
+                    logger.warning(f"JSON中未找到有效视频信息: videoInfoRes={bool(video_info)}")
             else:
                 logger.warning("_ROUTER_DATA 未找到")
                 
