@@ -14,13 +14,13 @@
 
 ```mermaid
 graph TD
-    User[用户 (企业微信)] -->|1. 抖音链接| Server[Bot主服务]
-    Server -->|2. 解析/下载| Parser[抖音解析器]
-    Server -->|3. AI总结| AI[三阶段AI管线]
-    AI -->|4. 生成PDF| PDF[PDF生成器]
-    AI -->|5. 存入SQLite| DB[(知识库 Knowledge.db)]
+    User["用户 (企业微信)"] -->|1. 抖音链接| Server["Bot主服务"]
+    Server -->|2. 解析/下载| Parser["抖音解析器"]
+    Server -->|3. AI总结| AI["三阶段AI管线"]
+    AI -->|4. 生成PDF| PDF["PDF生成器"]
+    AI -->|5. 存入SQLite| DB[("知识库 Knowledge.db")]
     
-    Claude[Claude.ai] <-->|MCP Protocol| MCPServer[MCP Server :8090]
+    Claude["Claude.ai"] <-->|MCP Protocol| MCPServer["MCP Server :8090"]
     MCPServer <-->|Query| DB
     
     Server -->|6. 返回PDF| User
