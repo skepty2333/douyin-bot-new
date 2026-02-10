@@ -26,6 +26,7 @@ class KnowledgeEntry:
     created_at: str = ""            # ISO 格式
     duration_seconds: float = 0.0
     video_code: str = ""            # 5位随机码 (uid)
+    timestamp: str = ""             # 北京时间
 
 
 class KnowledgeStore:
@@ -43,13 +44,16 @@ class KnowledgeStore:
         return conn
 
     def _init_db(self):
-        """初始化表结构和全文索引"""
+        """初始化表结构和全文索引 (强制重置以支持 Schema 变更)"""
         conn = self._get_conn()
         try:
+            # 强制重置
             conn.executescript("""
-                CREATE TABLE IF NOT EXISTS knowledge (
+                DROP TABLE IF EXISTS knowledge;
+                DROP TABLE IF EXISTS knowledge_fts;
+                CREATE TABLE knowledge (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    video_id TEXT UNIQUE NOT NULL,
+                    video_id TEXT NOT NULL,         -- 不再唯一，允许同一视频多条记录
                     title TEXT NOT NULL DEFAULT '',
                     author TEXT NOT NULL DEFAULT '',
                     source_url TEXT NOT NULL DEFAULT '',
@@ -58,11 +62,12 @@ class KnowledgeStore:
                     user_requirement TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL DEFAULT '',
                     duration_seconds REAL NOT NULL DEFAULT 0.0,
-                    video_code TEXT UNIQUE
+                    video_code TEXT UNIQUE,
+                    timestamp TEXT NOT NULL DEFAULT '' -- 北京时间戳
                 );
 
                 -- FTS5 全文搜索虚拟表 (中文分词用 unicode61)
-                CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+                CREATE VIRTUAL TABLE knowledge_fts USING fts5(
                     title,
                     author,
                     summary_markdown,
@@ -73,17 +78,17 @@ class KnowledgeStore:
                 );
 
                 -- 自动同步触发器
-                CREATE TRIGGER IF NOT EXISTS knowledge_ai AFTER INSERT ON knowledge BEGIN
+                CREATE TRIGGER knowledge_ai AFTER INSERT ON knowledge BEGIN
                     INSERT INTO knowledge_fts(rowid, title, author, summary_markdown, tags)
                     VALUES (new.id, new.title, new.author, new.summary_markdown, new.tags);
                 END;
 
-                CREATE TRIGGER IF NOT EXISTS knowledge_ad AFTER DELETE ON knowledge BEGIN
+                CREATE TRIGGER knowledge_ad AFTER DELETE ON knowledge BEGIN
                     INSERT INTO knowledge_fts(knowledge_fts, rowid, title, author, summary_markdown, tags)
                     VALUES ('delete', old.id, old.title, old.author, old.summary_markdown, old.tags);
                 END;
 
-                CREATE TRIGGER IF NOT EXISTS knowledge_au AFTER UPDATE ON knowledge BEGIN
+                CREATE TRIGGER knowledge_au AFTER UPDATE ON knowledge BEGIN
                     INSERT INTO knowledge_fts(knowledge_fts, rowid, title, author, summary_markdown, tags)
                     VALUES ('delete', old.id, old.title, old.author, old.summary_markdown, old.tags);
                     INSERT INTO knowledge_fts(rowid, title, author, summary_markdown, tags)
@@ -91,19 +96,7 @@ class KnowledgeStore:
                 END;
             """)
             conn.commit()
-            
-            # Migration: Add video_code column if not exists
-            try:
-                cursor = conn.execute("PRAGMA table_info(knowledge)")
-                columns = [input_row[1] for input_row in cursor.fetchall()]
-                if "video_code" not in columns:
-                    conn.execute("ALTER TABLE knowledge ADD COLUMN video_code TEXT")
-                    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_video_code ON knowledge(video_code)")
-                    conn.commit()
-            except Exception:
-                pass
-
-            logger.info(f"知识库初始化完成: {self.db_path}")
+            logger.info(f"知识库初始化完成 (重置): {self.db_path}")
         finally:
             conn.close()
 
@@ -111,35 +104,58 @@ class KnowledgeStore:
         """保存知识记录"""
         if not entry.created_at:
             entry.created_at = datetime.now(timezone.utc).isoformat()
+        
+        # 强制更新时间戳为北京时间 (简单起见，这里直接生成字符串)
+        # 注意: 实际应该用 pytz 或 zoneinfo，但为了减少依赖，这里简单处理 +8
+        from datetime import timedelta
+        beijing_time = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        entry.timestamp = beijing_time
 
         conn = self._get_conn()
         try:
+            # 这里的逻辑通过 video_code 唯一性来判断是否覆盖 (Overwrite)
+            # 如果是 "新增" (New)，video_code 应该是新的，所以是 INSERT
+            # 如果是 "覆盖" (Overwrite)，video_code 应该是旧的，所以是 UPDATE (ON CONFLICT)
+            
             cursor = conn.execute(
                 """INSERT INTO knowledge
                    (video_id, title, author, source_url, summary_markdown,
-                    tags, user_requirement, created_at, duration_seconds, video_code)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(video_id) DO UPDATE SET
+                    tags, user_requirement, created_at, duration_seconds, video_code, timestamp)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(video_code) DO UPDATE SET
                        title=excluded.title,
                        author=excluded.author,
                        summary_markdown=excluded.summary_markdown,
                        tags=excluded.tags,
                        user_requirement=excluded.user_requirement,
                        created_at=excluded.created_at,
-                       video_code=excluded.video_code
+                       timestamp=excluded.timestamp
                 """,
                 (
                     entry.video_id, entry.title, entry.author,
                     entry.source_url, entry.summary_markdown,
                     entry.tags, entry.user_requirement,
                     entry.created_at, entry.duration_seconds,
-                    entry.video_code
+                    entry.video_code, entry.timestamp
                 ),
             )
             conn.commit()
             entry_id = cursor.lastrowid
             logger.info(f"知识已保存: [{entry_id}] {entry.title}")
             return entry_id
+        finally:
+            conn.close()
+
+    def get_by_title_and_author(self, title: str, author: str) -> List[dict]:
+        """通过标题和作者查找重复视频"""
+        conn = self._get_conn()
+        try:
+            # 简单的精确匹配，实际可能需要模糊匹配？用户要求"双重合"，假设是精确匹配
+            rows = conn.execute(
+                "SELECT * FROM knowledge WHERE title = ? AND author = ? ORDER BY created_at DESC", 
+                (title, author)
+            ).fetchall()
+            return [dict(r) for r in rows]
         finally:
             conn.close()
 
@@ -150,7 +166,7 @@ class KnowledgeStore:
             # FTS5 搜索
             rows = conn.execute(
                 """SELECT k.id, k.video_id, k.title, k.author, k.tags,
-                          k.source_url, k.created_at, k.duration_seconds, k.video_code,
+                          k.source_url, k.created_at, k.duration_seconds, k.video_code, k.timestamp,
                           snippet(knowledge_fts, 2, '**', '**', '...', 40) AS snippet
                    FROM knowledge_fts fts
                    JOIN knowledge k ON k.id = fts.rowid
@@ -165,7 +181,7 @@ class KnowledgeStore:
             like = f"%{query}%"
             rows = conn.execute(
                 """SELECT id, video_id, title, author, tags,
-                          source_url, created_at, duration_seconds, video_code,
+                          source_url, created_at, duration_seconds, video_code, timestamp,
                           substr(summary_markdown, 1, 200) AS snippet
                    FROM knowledge
                    WHERE title LIKE ? OR author LIKE ?
@@ -188,10 +204,11 @@ class KnowledgeStore:
             conn.close()
 
     def get_by_video_id(self, video_id: str) -> Optional[dict]:
-        """通过视频ID获取"""
+        """通过视频ID获取 (可能返回多条，这里只返回最新一条)"""
         conn = self._get_conn()
         try:
-            row = conn.execute("SELECT * FROM knowledge WHERE video_id = ?", (video_id,)).fetchone()
+            # 修改为按时间倒序取最新
+            row = conn.execute("SELECT * FROM knowledge WHERE video_id = ? ORDER BY created_at DESC LIMIT 1", (video_id,)).fetchone()
             return dict(row) if row else None
         finally:
             conn.close()

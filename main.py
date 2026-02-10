@@ -71,6 +71,15 @@ class PendingTask:
     created_at: float = field(default_factory=time.time)
     timer_task: Optional[asyncio.Task] = None
     processing: bool = False
+    
+    # Duplicate Check State
+    waiting_for_dup_confirm: bool = False
+    dup_video_code: str = ""
+    dup_timestamp: str = ""
+    parsed_title: str = ""
+    parsed_author: str = ""
+    parsed_video_id: str = ""
+    parsed_video_path: str = ""
 
 
 _pending: Dict[str, PendingTask] = {}
@@ -79,6 +88,9 @@ _pending: Dict[str, PendingTask] = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs(TEMP_DIR, exist_ok=True)
+    # 初始化/重置数据库
+    # knowledge_db._init_db() # 已经在 __init__ 中调用，但为了强制重置 schema，这里显式调用一次?
+    # 不，_init_db 在实例化时调用。如果 knowledge_store.py 修改了 _init_db 逻辑，重启服务时会自动执行。
     logger.info("🚀 Bot 启动")
     yield
     logger.info("Bot 关闭")
@@ -120,7 +132,7 @@ async def receive_message(
         msg_type = xml_root.find("MsgType").text
         from_user = xml_root.find("FromUserName").text
 
-        # 去重
+        # 简单的去重
         msg_id = (xml_root.find("MsgId").text or "") if xml_root.find("MsgId") is not None else ""
         create_time = (xml_root.find("CreateTime").text or "") if xml_root.find("CreateTime") is not None else ""
         dedup_key = f"{msg_id}_{create_time}"
@@ -149,45 +161,97 @@ async def receive_message(
 async def handle_message(user_id: str, content: str):
     """消息路由"""
     try:
+        content_stripped = content.strip()
+        
         # 情况1: 用户在等待列表中
-        if user_id in _pending and not _pending[user_id].processing:
+        if user_id in _pending:
             pending = _pending[user_id]
-
-            # 检查是否新链接
-            new_url = extract_url_from_text(content)
-            if new_url:
-                if pending.timer_task and not pending.timer_task.done():
-                    pending.timer_task.cancel()
-                del _pending[user_id]
-                await _start_new_task(user_id, content, new_url)
+            
+            # A. 正在等待重复确认 (waiting_for_dup_confirm)
+            if pending.waiting_for_dup_confirm:
+                if content_stripped in ("覆盖", "Overwrite"):
+                    if pending.timer_task and not pending.timer_task.done():
+                        pending.timer_task.cancel()
+                    await send_text_message(user_id, f"确认覆盖，视频码：{pending.dup_video_code}，开始处理...")
+                    # 覆盖：复用旧的 video_code
+                    await _execute_summary_task(user_id, pending, reuse_video_code=pending.dup_video_code)
+                    
+                elif content_stripped in ("新增", "New"):
+                    if pending.timer_task and not pending.timer_task.done():
+                        pending.timer_task.cancel()
+                    new_code = generate_video_code()
+                    await send_text_message(user_id, f"确认新增，视频码：{new_code}，开始处理...")
+                    # 新增：使用新的 video_code
+                    await _execute_summary_task(user_id, pending, reuse_video_code=None)
+                    
+                elif content_stripped in ("取消", "Cancel"):
+                    if pending.timer_task and not pending.timer_task.done():
+                        pending.timer_task.cancel()
+                    await send_text_message(user_id, "收到，取消处理。")
+                    _cleanup_pending_files(pending)
+                    del _pending[user_id]
+                    
+                else:
+                    await send_text_message(user_id, "输入“覆盖”、“新增”或“取消”。")
                 return
 
-            # 补充要求
-            pending.extra_requirement = content.strip()
-            logger.info(f"📝 {user_id} 补充: {content[:30]}")
+            # B. 正常等待 (尚未开始处理)
+            if not pending.processing:
+                # 取消指令
+                if content_stripped in ("取消", "Cancel"):
+                    if pending.timer_task and not pending.timer_task.done():
+                        pending.timer_task.cancel()
+                    await send_text_message(user_id, "收到，取消处理。")
+                    _cleanup_pending_files(pending)
+                    del _pending[user_id]
+                    return
 
-            if pending.timer_task and not pending.timer_task.done():
-                pending.timer_task.cancel()
+                # 检查是否新链接 (打断当前，开始新的)
+                new_url = extract_url_from_text(content)
+                if new_url:
+                    if pending.timer_task and not pending.timer_task.done():
+                        pending.timer_task.cancel()
+                    # 清理旧文件
+                    _cleanup_pending_files(pending)
+                    del _pending[user_id]
+                    await _start_new_task(user_id, content, new_url)
+                    return
 
-            await _process_task(user_id)
-            return
+                # 立即开始
+                if content_stripped.lower() in ("开始", "start", "ok", "好"):
+                    if pending.timer_task and not pending.timer_task.done():
+                        pending.timer_task.cancel()
+                    await _process_task_init(user_id) # 立即触发处理流程 (含查重)
+                    return
+
+                # 补充要求
+                pending.extra_requirement = content_stripped
+                logger.info(f"📝 {user_id} 补充: {content[:30]}")
+                # 重新计时? 用户说 "等待两分钟"，通常是指从第一条消息开始。
+                # 但如果在最后一秒补充了要求，是否应该延时？
+                # "2分钟内可补充..."，所以这里保持原定时器，不重置，除非为了更好体验。
+                # 简单起见，不重置定时器，只更新要求。
+                # 但如果用户希望确认收到，可以回个简单的确认？
+                # 用户没要求回确认，只说 "回复前两个要求..." 是指最终回复。
+                return
 
         # 情况2: 新链接
         url = extract_url_from_text(content)
         if url:
+            # 如果之前有任务正在处理中 (processing=True)，是否允许插入？
+            # "视频正在处理中，请稍候..."
+            # 但如果 user_id 不在 _pending (说明处理完了)，则直接开始。
+            if user_id in _pending and _pending[user_id].processing:
+                await send_text_message(user_id, "视频正在处理中，请稍候...")
+                return
+
             await _start_new_task(user_id, content, url)
             return
 
-        # 情况3: 处理中
-        if user_id in _pending and _pending[user_id].processing:
-            await send_text_message(user_id, "视频正在处理中，请稍候...")
-            return
-
-        # 情况4: 帮助信息
+        # 情况3: 帮助信息
         await send_text_message(
             user_id,
-            "收到，请发送抖音链接。\n\n"
-            "发送链接后，2分钟内可补充具体要求（如'关注投资策略'）。"
+            "收到，发送“开始”立即处理，“取消”以取消操作，或输入具体要求。2分钟后默认处理。"
         )
 
     except Exception as e:
@@ -203,7 +267,7 @@ async def _start_new_task(user_id: str, content: str, url: str):
     task = PendingTask(user_id=user_id, share_url=url, share_text=inline_req)
     _pending[user_id] = task
 
-    await send_text_message(user_id, "收到。发送“开始”立即处理，或输入具体要求。2分钟后默认处理。")
+    await send_text_message(user_id, "收到，发送“开始”立即处理，“取消”以取消操作，或输入具体要求。2分钟后默认处理。")
     task.timer_task = asyncio.create_task(_wait_then_process(user_id))
 
 
@@ -211,20 +275,84 @@ async def _wait_then_process(user_id: str):
     """超时自动处理"""
     try:
         await asyncio.sleep(WAIT_SECONDS)
-        if user_id in _pending and not _pending[user_id].processing:
-            logger.info(f"⏰ {user_id} 超时，开始处理")
-            await _process_task(user_id)
+        if user_id in _pending:
+            task = _pending[user_id]
+            
+            # 如果是在等待重复确认状态超时
+            if task.waiting_for_dup_confirm:
+                logger.info(f"⏰ {user_id} 重复确认超时，默认取消")
+                await send_text_message(user_id, "两分钟超时，默认取消处理。")
+                _cleanup_pending_files(task)
+                del _pending[user_id]
+                return
+
+            # 正常超时，开始处理
+            if not task.processing:
+                logger.info(f"⏰ {user_id} 超时，开始处理")
+                await _process_task_init(user_id)
+                
     except asyncio.CancelledError:
         pass
 
 
-async def _process_task(user_id: str):
-    """执行处理流程"""
+async def _process_task_init(user_id: str):
+    """任务处理入口: 解析 -> 查重 -> (执行 或 等待确认)"""
     if user_id not in _pending: return
     task = _pending[user_id]
-    task.processing = True
-    video_id = None
+    task.processing = True 
 
+    try:
+        # 1. 解析下载 (获取 Title, Author, ID)
+        # 注意: 这里会下载视频，稍微有点耗时，但必须下载解析才能知道 Title/Author。
+        # 如果是大V账号，可能解析耗时较长。
+        video_info = await resolve_and_download(task.share_url)
+        
+        task.parsed_video_id = video_info["video_id"]
+        task.parsed_title = video_info["title"] or "未知标题"
+        task.parsed_author = video_info["author"] or "未知作者"
+        task.parsed_video_path = video_info["video_path"]
+
+        # 2. 查重 (Title + Author)
+        # 获取最新的那一条
+        duplicates = knowledge_db.get_by_title_and_author(task.parsed_title, task.parsed_author)
+        
+        if duplicates:
+            latest = duplicates[0] # 按时间倒序，取第一个
+            
+            # 进入确认模式
+            task.waiting_for_dup_confirm = True
+            task.processing = False # 暂停 processing 状态，允许响应消息
+            task.dup_video_code = latest.get("video_code", "N/A")
+            task.dup_timestamp = latest.get("timestamp", "未知时间")
+            
+            msg = (
+                f"查询到重复视频\n"
+                f"视频码：{task.dup_video_code}\n"
+                f"时间戳：{task.dup_timestamp}\n\n"
+                f"输入“覆盖”以覆盖旧视频，“新增”以直接添加新条目，“取消”以取消处理。\n"
+                f"两分钟后默认取消。"
+            )
+            await send_text_message(user_id, msg)
+            
+            # 重设超时计时器 (2分钟)
+            task.timer_task = asyncio.create_task(_wait_then_process(user_id))
+            return 
+        
+        # 无重复，直接执行
+        await _execute_summary_task(user_id, task, reuse_video_code=None)
+
+    except Exception as e:
+        logger.error(f"任务初始化失败: {e}", exc_info=True)
+        await send_text_message(user_id, f"处理失败: {str(e)[:100]}")
+        _cleanup_pending_files(task)
+        _pending.pop(user_id, None)
+
+
+async def _execute_summary_task(user_id: str, task: PendingTask, reuse_video_code: Optional[str] = None):
+    """执行 AI 总结和后续流程"""
+    task.processing = True
+    video_id = task.parsed_video_id
+    
     try:
         # 合并要求
         req = task.share_text
@@ -232,27 +360,20 @@ async def _process_task(user_id: str):
             if task.extra_requirement.strip().lower() not in ("开始", "start", "ok", "好"):
                 req = task.extra_requirement
 
-        # 1. 解析下载
-        video_info = await resolve_and_download(task.share_url)
-        video_id = video_info["video_id"]
-        title = video_info["title"] or "未知标题"
-        author = video_info["author"] or "未知作者"
-
-        # 2. 提取音频
-        audio_path = extract_audio(video_info["video_path"])
-        video_code = generate_video_code()
+        # 提取音频
+        audio_path = extract_audio(task.parsed_video_path)
         
-        await send_text_message(user_id, f"视频: {title}\n作者: {author}\n视频码: {video_code}\n\n处理中...")
-
+        video_code = reuse_video_code if reuse_video_code else generate_video_code()
+        
         # 3. AI 总结
         async def progress(msg): pass
-        summary = await summarize_with_audio(audio_path, title, author, req, progress_callback=progress)
+        summary = await summarize_with_audio(audio_path, task.parsed_title, task.parsed_author, req, progress_callback=progress)
 
         # 存入知识库
         try:
             tags = extract_tags_from_markdown(summary)
             entry = KnowledgeEntry(
-                video_id=video_id, title=title, author=author, source_url=task.share_url,
+                video_id=video_id, title=task.parsed_title, author=task.parsed_author, source_url=task.share_url,
                 summary_markdown=summary, tags=tags, user_requirement=req, video_code=video_code,
             )
             knowledge_db.save(entry)
@@ -276,22 +397,24 @@ async def _process_task(user_id: str):
             await send_text_message(user_id, "PDF失败，发送文本:")
             await send_markdown_message(user_id, summary)
 
-        logger.info(f"完成: {title}")
+        logger.info(f"完成: {task.parsed_title}")
 
     except Exception as e:
-        logger.error(f"任务失败: {e}", exc_info=True)
-        try:
-            await send_text_message(user_id, f"处理失败: {str(e)[:100]}")
-        except: pass
+        logger.error(f"任务执行失败: {e}", exc_info=True)
+        await send_text_message(user_id, f"处理失败: {str(e)[:100]}")
 
     finally:
-        if video_id:
-            try:
-                cleanup_files(video_id)
-                if os.path.exists(os.path.join(TEMP_DIR, f"{video_id}_summary.pdf")):
-                     os.remove(os.path.join(TEMP_DIR, f"{video_id}_summary.pdf"))
-            except: pass
+        _cleanup_pending_files(task)
         _pending.pop(user_id, None)
+
+
+def _cleanup_pending_files(task: PendingTask):
+    """清理临时文件"""
+    if task.parsed_video_id:
+        cleanup_files(task.parsed_video_id)
+    if task.parsed_video_path and os.path.exists(task.parsed_video_path):
+        try: os.remove(task.parsed_video_path)
+        except: pass
 
 
 async def _send_file_message(user_id: str, media_id: str):
