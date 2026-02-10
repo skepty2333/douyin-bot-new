@@ -351,9 +351,10 @@ tr:nth-child(2n) { background-color: #f6f8fa; }
 img { max-width: 100%; }
 img.block-formula { display: block; margin: 0 auto; }
 .inline-formula { vertical-align: middle; }
+.author-info { font-size: 1.1em; color: #57606a; margin-bottom: 24px; font-style: italic; }
 """
 
-def generate_pdf(markdown_content: str, output_path: str) -> bool:
+def generate_pdf(markdown_content: str, output_path: str, author: str = "") -> bool:
     """生成 PDF"""
     try:
         import markdown
@@ -368,6 +369,12 @@ def generate_pdf(markdown_content: str, output_path: str) -> bool:
             content,
             extensions=['extra', 'tables', 'fenced_code', 'sane_lists'],
         )
+
+        # 插入作者信息到 HTML
+        if author:
+            # 在第一个 h1 后面或者是开头插入作者
+            # 简单起见，直接在 body 开头加一个 subtitle
+            html_content = f'<div class="author-info">Author: {author}</div>\n{html_content}'
 
         full_html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
