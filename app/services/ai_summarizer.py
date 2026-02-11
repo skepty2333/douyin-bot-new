@@ -15,7 +15,9 @@ from app.config import (
 logger = logging.getLogger(__name__)
 
 
-async def _chat(model, messages, api_key, max_tokens=8192, temperature=0.3, timeout=180) -> str:
+from typing import Optional, Callable
+
+async def _chat(model, messages, api_key, max_tokens=8192, temperature=0.3, timeout=180, callback: Optional[Callable] = None) -> str:
     """OpenAI 兼容对话接口 (用于 Gemini 和 Sonnet via uiuiapi)"""
     url = f"{API_BASE_URL}/chat/completions"
     headers = {
@@ -38,17 +40,20 @@ async def _chat(model, messages, api_key, max_tokens=8192, temperature=0.3, time
             # 捕获 429, 5xx, 3xx 进行重试
             if e.response.status_code in (429, 401, 403) or e.response.status_code >= 500 or (300 <= e.response.status_code < 400):
                 logger.warning(f"主站异常 ({e.response.status_code})，尝试切换副站: {e}")
-                return await _chat_failover(model, messages, max_tokens, temperature, timeout)
+                if callback: await callback("⚠️ 主线路繁忙，正在切换备用线路...")
+                return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
             raise e
         except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError) as e:
             logger.warning(f"主站连接失败 ({type(e).__name__})，尝试切换副站: {e}")
-            return await _chat_failover(model, messages, max_tokens, temperature, timeout)
+            if callback: await callback("⚠️ 主线路连接超时，正在切换备用线路...")
+            return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
         except Exception as e:
             logger.warning(f"主站未知异常: {e}，尝试切换副站...")
-            return await _chat_failover(model, messages, max_tokens, temperature, timeout)
+            if callback: await callback("⚠️ 主线路异常，正在切换备用线路...")
+            return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
 
 
-async def _chat_failover(model, messages, max_tokens, temperature, timeout) -> str:
+async def _chat_failover(model, messages, max_tokens, temperature, timeout, callback: Optional[Callable] = None) -> str:
     """副站重试逻辑"""
     from app.config import (
         SECONDARY_API_BASE_URL, 
@@ -169,13 +174,13 @@ STAGE3_SYSTEM = """你是一位顶级知识编辑。请将初稿和《深度研�
 
 # ======================== Stage 1: Gemini ========================
 
-async def stage1_transcribe_and_draft(audio_path, video_title="", video_author="", user_requirement="") -> str:
+async def stage1_transcribe_and_draft(audio_path, video_title="", video_author="", user_requirement="", callback: Optional[Callable] = None) -> str:
     """Gemini 多模态: 音频 → 初稿"""
     logger.info("[Stage1] Gemini 转写+初稿")
 
     if os.path.getsize(audio_path) > 24 * 1024 * 1024:
         # 大文件回退处理
-        return await _stage1_large_audio(audio_path, video_title, video_author, user_requirement)
+        return await _stage1_large_audio(audio_path, video_title, video_author, user_requirement, callback)
 
     with open(audio_path, "rb") as f:
         audio_b64 = base64.b64encode(f.read()).decode()
@@ -193,13 +198,13 @@ async def stage1_transcribe_and_draft(audio_path, video_title="", video_author="
     ]
 
     try:
-        return await _chat(GEMINI_MODEL, messages, GEMINI_API_KEY, timeout=240)
+        return await _chat(GEMINI_MODEL, messages, GEMINI_API_KEY, timeout=240, callback=callback)
     except Exception as e:
         logger.warning(f"[Stage1] 失败，回退: {e}")
-        return await _stage1_fallback(audio_path, video_title, video_author, user_requirement)
+        return await _stage1_fallback(audio_path, video_title, video_author, user_requirement, callback)
 
 
-async def _stage1_fallback(audio_path, title, author, req) -> str:
+async def _stage1_fallback(audio_path, title, author, req, callback: Optional[Callable] = None) -> str:
     """WHISPER 转写 + LLM 总结"""
     transcript = await _transcribe_audio(audio_path)
     prompt = f"{_build_context(title, author, req)}\n\n转写文本:\n\n{transcript}"
@@ -207,10 +212,10 @@ async def _stage1_fallback(audio_path, title, author, req) -> str:
         {"role": "system", "content": STAGE1_SYSTEM},
         {"role": "user", "content": prompt},
     ]
-    return await _chat(GEMINI_MODEL, messages, GEMINI_API_KEY)
+    return await _chat(GEMINI_MODEL, messages, GEMINI_API_KEY, callback=callback)
 
 
-async def _stage1_large_audio(audio_path, title, author, req) -> str:
+async def _stage1_large_audio(audio_path, title, author, req, callback: Optional[Callable] = None) -> str:
     """大文件分段转写"""
     import subprocess
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path], capture_output=True, text=True)
@@ -232,7 +237,7 @@ async def _stage1_large_audio(audio_path, title, author, req) -> str:
 
     transcript = "\n".join(parts)
     prompt = f"{_build_context(title, author, req)}\n\n转写文本:\n\n{transcript}"
-    return await _chat(GEMINI_MODEL, [{"role": "system", "content": STAGE1_SYSTEM}, {"role": "user", "content": prompt}], GEMINI_API_KEY)
+    return await _chat(GEMINI_MODEL, [{"role": "system", "content": STAGE1_SYSTEM}, {"role": "user", "content": prompt}], GEMINI_API_KEY, callback=callback)
 
 
 async def _transcribe_audio(audio_path: str) -> str:
@@ -285,7 +290,7 @@ async def stage2_deep_research(draft_markdown: str) -> str:
 
 # ======================== Stage 3: Sonnet ========================
 
-async def stage3_enrich_and_finalize(draft_markdown, research_report, video_author="", user_requirement="") -> str:
+async def stage3_enrich_and_finalize(draft_markdown, research_report, video_author="", user_requirement="", callback: Optional[Callable] = None) -> str:
     """Sonnet 融合初稿与研究报告"""
     logger.info("[Stage3] Sonnet 终稿生成")
     user_content = f"## 初稿\n{draft_markdown}\n\n## 深度研究报告\n{research_report}\n"
@@ -296,7 +301,7 @@ async def stage3_enrich_and_finalize(draft_markdown, research_report, video_auth
     messages = [{"role": "system", "content": STAGE3_SYSTEM}, {"role": "user", "content": user_content}]
     
     # Sonnet 纯文本生成
-    return await _chat(SONNET_MODEL, messages, SONNET_API_KEY, max_tokens=8192, temperature=0.3)
+    return await _chat(SONNET_MODEL, messages, SONNET_API_KEY, max_tokens=8192, temperature=0.3, callback=callback)
 
 
 async def summarize_with_audio(audio_path, video_title="", video_author="", user_requirement="", progress_callback=None) -> str:
@@ -305,13 +310,13 @@ async def summarize_with_audio(audio_path, video_title="", video_author="", user
         if progress_callback: await progress_callback(msg)
 
     await notify("🔬 [1/3] Gemini 转写生成初稿...")
-    draft = await stage1_transcribe_and_draft(audio_path, video_title, video_author, user_requirement)
+    draft = await stage1_transcribe_and_draft(audio_path, video_title, video_author, user_requirement, callback=notify)
     
     await notify("🧠 [2/3] Qwen 深度思考与联网研究...")
     research_report = await stage2_deep_research(draft)
     
     await notify("✍️ [3/3] Sonnet 整合生成终稿...")
-    final = await stage3_enrich_and_finalize(draft, research_report, video_author, user_requirement)
+    final = await stage3_enrich_and_finalize(draft, research_report, video_author, user_requirement, callback=notify)
     
     await notify("✅ 处理完成")
     return final

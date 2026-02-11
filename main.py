@@ -377,7 +377,12 @@ async def _execute_summary_task(user_id: str, task: PendingTask, reuse_video_cod
         await send_text_message(user_id, f"视频: {task.parsed_title}\n作者: {task.parsed_author}\n视频码: {video_code}\n\n处理中...")
 
         # 3. AI 总结
-        async def progress(msg): pass
+        async def progress(msg):
+            try:
+                await send_text_message(user_id, msg)
+            except Exception as e:
+                logger.error(f"发送进度消息失败: {e}")
+
         summary = await summarize_with_audio(audio_path, task.parsed_title, task.parsed_author, req, progress_callback=progress)
 
         # 存入知识库
