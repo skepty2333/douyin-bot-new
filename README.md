@@ -9,62 +9,61 @@
 
 这是一个运行在企业微信上的智能 Bot。发送抖音视频链接，它将自动通过 **三阶段 AI 管线**（听录 -> 深度研究 -> 总结），生成一份包含核心观点、事实核查和背景知识的精美 PDF 报告。
 
-此外，它会自动将所有历史笔记沉淀为 **SQLite 向量知识库**，并内置 **MCP Server**，支持通过 **Claude Connector (Web) / Desktop** 或 **Cursor** 远程调用，让你随时与自己的视频知识库对话。
+所有笔记自动沉淀为 **SQLite 知识库**，并通过 **AI 语义标签** 驱动检索。内置 **MCP Server** 支持 **Claude / Cursor** 远程调用，随时与个人视频知识库对话。
 
 ---
 
 ## 核心特性
 
-### 🚀 智能交互
-- **即时响应**：发送视频链接后，Bot 会立即准备就绪。
-- **自定义要求**：
-    - **自动开始**：发送链接后，直接发送你的具体要求（如“提取由于...的原因”、“总结为表格”），Bot 会**自动确认并立即开始**。
-- **静默处理**：无需繁琐的确认指令，一切按你所想自动运行。
+### 智能交互 & 任务队列
+- **即时响应**：发送视频链接后，Bot 立即准备就绪。
+- **自定义要求**：发送链接后直接发送具体要求（如"总结为表格"），Bot 自动确认并立即开始。
+- **任务队列**：处理中可继续发送新链接，自动排队（每用户最多 3 个），前序任务完成后自动处理下一个。
+- **队列状态查询**：发送"队列"或"状态"可查看当前排队情况。
+- **重复检测**：自动识别已处理过的视频，支持覆盖或新增。
 
-### 🧠 三阶段 AI 深度管线
-本项目采用先进的 "Chain of Thought" 设计：
-1.  **Stage 1: 全文听录 (Gemini 3 Pro)**
-    - 多模态/Whisper 识别视频中的所有语音内容，生成逐字稿。
-    - *支持自动故障切换 (Failover)*：主线路繁忙时自动切换备用 API。
-2.  **Stage 2: 深度审视 & 联网 (Qwen-Max)**
-    - **联网搜索**：不仅仅是总结，还会对视频内容进行**事实核查**。
-    - **知识审计**：发现视频中的逻辑漏洞，补充缺失的背景概念。
-    - **全网搜索详情**：保留详细的搜索来源和数据支撑，拒绝空洞。
-3.  **Stage 3: 终稿生成 (Claude Sonnet 4.5)**
-    - 结合初稿与研究报告，由最强的逻辑模型生成最终的结构化笔记。
-    - 支持复杂的 Markdown 排版和 LaTeX 公式（自动转图片渲染）。
+### 三阶段 AI 深度管线
 
-### 📄 专业级输出
-- **精美 PDF**：基于 HTML+CSS (WeasyPrint) 渲染，像 GitHub Readme 一样美观。
-- **知识库沉淀**：
-    - 所有历史记录存入 SQLite 数据库。
-    - 支持 **FTS5 全文检索**。
-- **MCP 协议支持**：
-    - 内置 MCP Server，支持通过 **Claude Connector (Web) / Desktop** 或 **Cursor** 远程调用你的私人视频知识库。
-    - 问 Claude："帮我找一下之前看过的关于‘量子力学’的视频笔记"，即刻检索。
+| 阶段 | 模型 | 功能 |
+|:---:|:---:|:---|
+| **Stage 1** | Gemini 3 Pro | 多模态/Whisper 语音识别，生成逐字稿。支持主/备自动故障切换。 |
+| **Stage 2** | Qwen-Max | 联网搜索 + 事实核查 + 知识补充，发现逻辑漏洞，保留搜索来源。 |
+| **Stage 3** | Claude Sonnet 4.5 | 结合初稿与研究报告，生成最终结构化笔记，支持 Markdown + LaTeX。 |
+
+### 知识库 & 检索
+- **AI 语义标签**：每篇笔记由 DeepSeek 自动生成 5-10 个语义化检索标签（如"AI编程,智能体,强化学习"），替代传统关键词提取。
+- **三层搜索策略**：标签 LIKE 匹配 → FTS5 全文检索 → LIKE 兜底，确保高召回率。
+- **精确搜索**：支持 AND 逻辑多关键词精确匹配，快速缩小范围。
+- **MCP 协议**：Claude / Cursor 远程调用知识库，7 个 MCP 工具覆盖搜索/检索/统计。
+
+### 专业级输出
+- **精美 PDF**：基于 HTML+CSS (WeasyPrint) 渲染，支持中文字体、加粗、LaTeX 公式。
+- **多格式交付**：PDF 优先，失败时自动降级为 Markdown 文本。
 
 ---
 
-## 🛠️ 架构图
+## 架构图
 
 ```mermaid
 graph TD
-    User["用户 (企业微信)"] -->|1. 分享链接| Server["Bot主服务"]
-    User -->|2. 补充要求| Server
+    User["用户 (企业微信)"] -->|1. 分享链接| Server["Bot主服务 :8080"]
+    User -->|2. 补充要求 / 新链接入队| Server
     Server -->|3. 解析/下载| Parser["抖音轻量解析器"]
     Server -->|4. AI总结| AI["三阶段AI管线\n(Gemini -> Qwen -> Sonnet)"]
+    Server -->|4.1 生成标签| DS["DeepSeek\n(语义标签生成)"]
     AI -->|5. 生成PDF| PDF["PDF生成器"]
-    AI -->|6. 存入SQLite| DB[("知识库 Knowledge.db")]
+    AI -->|6. 存入SQLite| DB[("知识库\nknowledge.db")]
+    DS -->|标签写入| DB
     
-    Claude["Claude.ai"] <-->|MCP Protocol| MCPServer["MCP Server :8090"]
-    MCPServer <-->|Query| DB
+    Claude["Claude / Cursor"] <-->|MCP Protocol| MCPServer["MCP Server :8090"]
+    MCPServer <-->|搜索/检索| DB
     
-    Server -->|7. 推送文件| User
+    Server -->|7. 推送 PDF/文本| User
 ```
 
 ---
 
-## ⚡ 快速部署
+## 快速部署
 
 ### 环境要求
 - Python 3.10+
@@ -96,17 +95,22 @@ vim .env
 | | `CORP_SECRET` | 应用 Secret |
 | | `CALLBACK_TOKEN` | 回调 Token |
 | | `CALLBACK_AES_KEY` | 回调 EncodingAESKey |
-| **主 AI 模型** | `API_BASE_URL` | UIUIAPI 或 OpenAI 兼容地址 |
-| | `GEMINI_API_KEY` | Stage 1 Key |
-| | `SONNET_API_KEY` | Stage 3 Key |
-| **副 AI 模型** | `SECONDARY_...` | (可选) 备用线路配置，用于故障切换 |
-| **深度研究** | `DASHSCOPE_API_KEY` | 阿里云 DashScope Key (用于 Qwen) |
+| **Stage 1** | `API_BASE_URL` | OpenAI 兼容 API 地址 |
+| | `GEMINI_API_KEY` | Gemini Key |
+| **Stage 2** | `DASHSCOPE_API_KEY` | 阿里云 DashScope Key (Qwen) |
+| **Stage 3** | `SONNET_API_KEY` | Sonnet Key |
+| **标签生成** | `DEEPSEEK_API_KEY` | DeepSeek Key (语义标签) |
+| | `DEEPSEEK_MODEL` | 默认 `deepseek-chat` |
+| **备用线路** | `SECONDARY_...` | (可选) 故障切换配置 |
 
 ### 3. 启动服务
 
 ```bash
-# 启动主服务
+# 启动主服务 (企业微信 Bot)
 sudo systemctl start douyin-bot
+
+# 启动 MCP Server (知识库检索)
+sudo systemctl start mcp-server
 
 # 查看日志
 journalctl -u douyin-bot -f
@@ -114,43 +118,83 @@ journalctl -u douyin-bot -f
 
 ---
 
-## 📖 使用指南
+## 使用指南
 
 ### 基础用法
-1. 在抖音 APP 中点击分享 -> **复制链接**。
-2. 在企业微信中发送给 Bot。
-3. Bot 回复“收到...”。
-4. **如果无需额外要求**：发送“**开始**”或等待 2 分钟，Bot 自动运行。
-5. **如果有要求**：直接发送“**总结一下其中的商业模式**”。
-    - Bot 会回复“已收到补充要求，正在开始处理...”。
-    - 随后自动开始，无需再发指令。
+1. 在抖音 APP 中**复制链接**。
+2. 发送给企业微信 Bot。
+3. **无需额外要求**：发送"开始"或等待 2 分钟自动处理。
+4. **有具体要求**：直接发送要求文本，Bot 自动确认并开始。
 
-### 高级用法 (MCP)
-如果你使用 Claude.ai 或 Cursor：
-1. 启动 `mcp_server.py` (通常由 systemd 管理)。
-2. 使用 `cloudflared` 将 8090 端口暴露为 HTTPS。
-3. 在 Claude 中配置 MCP Server URL。
-4. 对话示例：
-   > "查询我的知识库，最近有没有关于‘AI 编程’的视频？"
+### 任务队列
+- 处理中发送新链接 → 自动入队。
+- 发送"**队列**"或"**状态**" → 查看排队情况。
+- 每用户最多排队 3 个任务，前序完成后自动处理。
+
+### 重复视频处理
+- Bot 自动检测同标题/同作者的历史记录。
+- 输入"**覆盖**"替换旧记录，"**新增**"保留两份，"**取消**"放弃。
+
+### MCP 知识库检索
+
+启动 MCP Server 后，通过 Claude / Cursor 调用：
+
+| MCP 工具 | 功能 |
+|:---|:---|
+| `search_notes` | 宽松搜索（OR 逻辑），覆盖面广 |
+| `search_notes_precise` | 精确搜索（AND 逻辑），所有关键词必须同时命中 |
+| `get_note` / `get_note_by_code` | 通过 ID 或视频码获取完整笔记 |
+| `list_notes` | 列出最近笔记 |
+| `list_by_tag` | 按标签筛选 |
+| `knowledge_stats` | 知识库统计 |
+
+对话示例：
+> "帮我找关于'量化交易'的视频笔记" → `search_notes`
+> 
+> "找同时提到'AI编程'和'开源项目'的笔记" → `search_notes_precise`
 
 ---
 
-## 🔧 常见问题 (FAQ)
+## 项目结构
 
-**Q: 为什么 PDF 中的中文是乱码？**
-A: 服务器缺少中文字体。`setup.sh` 脚本会自动尝试安装 `google-noto-sans-cjk-ttc-fonts`。如果失败，请手动安装字体并刷新缓存 (`fc-cache -fv`)。
+```
+douyin-bot/
+├── main.py                          # 主服务入口 (FastAPI)
+├── mcp_server.py                    # MCP Server (知识库检索)
+├── app/
+│   ├── config.py                    # 配置管理
+│   ├── database/
+│   │   └── knowledge_store.py       # SQLite 知识库 (FTS5 + 标签搜索)
+│   ├── services/
+│   │   ├── ai_summarizer.py         # 三阶段 AI 管线 + DeepSeek 标签生成
+│   │   ├── douyin_parser.py         # 抖音视频解析/下载
+│   │   ├── pdf_generator.py         # PDF 渲染 (WeasyPrint)
+│   │   └── wechat_api.py            # 企业微信 API
+│   └── utils/
+│       └── wechat_crypto.py         # 消息加解密
+├── scripts/
+│   └── setup.sh                     # 环境安装脚本
+└── knowledge.db                     # SQLite 知识库
+```
+
+---
+
+## 常见问题
+
+**Q: PDF 中文乱码？**
+服务器缺少中文字体。运行 `setup.sh` 或手动安装 `google-noto-sans-cjk-ttc-fonts`，刷新缓存 `fc-cache -fv`。
 
 **Q: 解析失败或下载慢？**
-A: 抖音对数据中心 IP 有反爬策略。建议使用家庭宽带 IP 或尝试更替服务器 IP。
+抖音对数据中心 IP 有反爬策略。建议使用家庭宽带 IP 或更替服务器 IP。
 
 **Q: 备用线路是什么？**
-A: 系统内置了高可用逻辑。当主 API (如 UIUIAPI) 返回 429 或 5xx 错误时，系统会自动尝试 `SECONDARY_` 配置的 API Key，确保服务稳定性。
+当主 API 返回 429/5xx 错误时，系统自动切换 `SECONDARY_` 配置的备用 Key，确保服务稳定。务必配置备用线路。
 
-**Q: UIUIAPI 不稳定经常报错？**
-A: UIUIAPI 作为第三方中转服务，可能会出现偶发性波动 (429/502)。建议**务必配置备用线路** (`SECONDARY_...`)，可以使用官方 Key 或其他中转服务作为兜底，Bot 会自动处理切换。
+**Q: 标签生成失败？**
+如果 DeepSeek API 调用失败，系统会自动回退到正则提取（从 Markdown 加粗词中提取）。优先确保 `DEEPSEEK_API_KEY` 配置正确。
 
 ---
 
-## 📜 许可证
+## 许可证
 
 MIT License

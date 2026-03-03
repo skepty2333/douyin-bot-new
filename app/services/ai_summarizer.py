@@ -2,6 +2,7 @@
 import base64
 import os
 import logging
+import asyncio
 import httpx
 from openai import OpenAI
 
@@ -16,6 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 from typing import Optional, Callable
+
+# ====================== FIX 1: 文件大小阈值 ======================
+# base64 编码膨胀 ~33%，API 网关通常限制 20-25MB
+# 原始文件 15MB → base64 约 20MB，留安全余量
+MULTIMODAL_SIZE_LIMIT = 15 * 1024 * 1024  # 15MB (原来是 24MB)
+
 
 async def _chat(model, messages, api_key, max_tokens=8192, temperature=0.3, timeout=180, callback: Optional[Callable] = None) -> str:
     """OpenAI 兼容对话接口 (用于 Gemini 和 Sonnet via uiuiapi)"""
@@ -37,9 +44,32 @@ async def _chat(model, messages, api_key, max_tokens=8192, temperature=0.3, time
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
         except httpx.HTTPStatusError as e:
-            # 捕获 429, 5xx, 3xx 进行重试
-            if e.response.status_code in (429, 401, 403) or e.response.status_code >= 500 or (300 <= e.response.status_code < 400):
-                logger.warning(f"主站异常 ({e.response.status_code})，尝试切换副站: {e}")
+            status = e.response.status_code
+
+            # ====================== FIX 2: 429 指数退避重试 ======================
+            if status == 429:
+                logger.warning(f"主站 429 限流，尝试退避重试...")
+                if callback: await callback("⚠️ API 限流，等待重试中...")
+                for attempt in range(3):
+                    wait = (2 ** attempt) * 5  # 5s, 10s, 20s
+                    logger.info(f"429 退避等待 {wait}s (attempt {attempt + 1}/3)")
+                    await asyncio.sleep(wait)
+                    try:
+                        resp = await client.post(url, headers=headers, json=payload)
+                        resp.raise_for_status()
+                        return resp.json()["choices"][0]["message"]["content"]
+                    except httpx.HTTPStatusError as retry_e:
+                        if retry_e.response.status_code != 429:
+                            break  # 非429错误，跳出重试
+                        continue
+                # 重试耗尽，切副站
+                logger.warning("429 重试耗尽，切换副站")
+                if callback: await callback("⚠️ 主线路持续限流，切换备用线路...")
+                return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
+
+            # 其他可重试状态码直接切副站
+            if status in (401, 403) or status >= 500 or (300 <= status < 400):
+                logger.warning(f"主站异常 ({status})，尝试切换副站: {e}")
                 if callback: await callback("⚠️ 主线路繁忙，正在切换备用线路...")
                 return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
             raise e
@@ -89,11 +119,26 @@ async def _chat_failover(model, messages, max_tokens, temperature, timeout, call
         "temperature": temperature,
     }
 
-    logger.info(f"正在请求副站: {url} (Model: {target_model})")
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"]
+        # 副站也增加重试逻辑 (3次)，应对 502/429
+        for attempt in range(3):
+            try:
+                logger.info(f"正在请求副站 (Attempt {attempt+1}/3): {url} (Model: {target_model})")
+                resp = await client.post(url, headers=headers, json=payload)
+                resp.raise_for_status()
+                return resp.json()["choices"][0]["message"]["content"]
+            except httpx.HTTPStatusError as e:
+                logger.warning(f"副站请求失败 ({e.response.status_code}): {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                raise e # 重试耗尽，抛出异常
+            except Exception as e:
+                logger.warning(f"副站连接/未知错误: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(2)
+                    continue
+                raise e
 
 
 
@@ -178,8 +223,12 @@ async def stage1_transcribe_and_draft(audio_path, video_title="", video_author="
     """Gemini 多模态: 音频 → 初稿"""
     logger.info("[Stage1] Gemini 转写+初稿")
 
-    if os.path.getsize(audio_path) > 24 * 1024 * 1024:
-        # 大文件回退处理
+    file_size = os.path.getsize(audio_path)
+    logger.info(f"[Stage1] 音频文件大小: {file_size / 1024 / 1024:.1f}MB")
+
+    # ====================== FIX 3: 使用新阈值 ======================
+    if file_size > MULTIMODAL_SIZE_LIMIT:
+        logger.info(f"[Stage1] 文件超过 {MULTIMODAL_SIZE_LIMIT // 1024 // 1024}MB，走分段转写")
         return await _stage1_large_audio(audio_path, video_title, video_author, user_requirement, callback)
 
     with open(audio_path, "rb") as f:
@@ -200,19 +249,33 @@ async def stage1_transcribe_and_draft(audio_path, video_title="", video_author="
     try:
         return await _chat(GEMINI_MODEL, messages, GEMINI_API_KEY, timeout=240, callback=callback)
     except Exception as e:
-        logger.warning(f"[Stage1] 失败，回退: {e}")
+        logger.warning(f"[Stage1] 多模态失败，回退: {e}")
+        # ====================== FIX 4: fallback 智能选择 ======================
         return await _stage1_fallback(audio_path, video_title, video_author, user_requirement, callback)
 
 
 async def _stage1_fallback(audio_path, title, author, req, callback: Optional[Callable] = None) -> str:
-    """WHISPER 转写 + LLM 总结"""
-    transcript = await _transcribe_audio(audio_path)
-    prompt = f"{_build_context(title, author, req)}\n\n转写文本:\n\n{transcript}"
-    messages = [
-        {"role": "system", "content": STAGE1_SYSTEM},
-        {"role": "user", "content": prompt},
-    ]
-    return await _chat(GEMINI_MODEL, messages, GEMINI_API_KEY, callback=callback)
+    """转写 fallback: Whisper → 分段转写 (不再死循环回 multimodal)"""
+    file_size = os.path.getsize(audio_path)
+
+    # ====================== FIX 5: Whisper 也有大小限制 (通常 25MB) ======================
+    # 先尝试 Whisper，失败后走分段而非重试 multimodal
+    if file_size <= 25 * 1024 * 1024:
+        try:
+            transcript = await _transcribe_audio_whisper_only(audio_path)
+            prompt = f"{_build_context(title, author, req)}\n\n转写文本:\n\n{transcript}"
+            messages = [
+                {"role": "system", "content": STAGE1_SYSTEM},
+                {"role": "user", "content": prompt},
+            ]
+            return await _chat(GEMINI_MODEL, messages, GEMINI_API_KEY, callback=callback)
+        except Exception as e:
+            logger.warning(f"[Stage1 Fallback] Whisper 也失败: {e}")
+
+    # ====================== FIX 6: 最终兜底 = 分段转写，不再循环回 multimodal ======================
+    logger.info("[Stage1 Fallback] 走分段转写兜底")
+    if callback: await callback("⚠️ 正在使用分段转写模式...")
+    return await _stage1_large_audio(audio_path, title, author, req, callback)
 
 
 async def _stage1_large_audio(audio_path, title, author, req, callback: Optional[Callable] = None) -> str:
@@ -221,39 +284,70 @@ async def _stage1_large_audio(audio_path, title, author, req, callback: Optional
     probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", audio_path], capture_output=True, text=True)
     duration = float(probe.stdout.strip())
 
+    segment_duration = 600  # 10分钟一段
     segments, start = [], 0
     while start < duration:
         seg = audio_path.replace(".mp3", f"_seg{int(start)}.mp3")
-        subprocess.run(["ffmpeg", "-ss", str(start), "-i", audio_path, "-t", "600", "-acodec", "libmp3lame", "-y", seg], capture_output=True)
+        subprocess.run(["ffmpeg", "-ss", str(start), "-i", audio_path, "-t", str(segment_duration), "-acodec", "libmp3lame", "-y", seg], capture_output=True)
         if os.path.exists(seg): segments.append(seg)
-        start += 600
+        start += segment_duration
+
+    logger.info(f"[Stage1 大文件] 分为 {len(segments)} 段")
 
     parts = []
-    for seg in segments:
-        try: parts.append(await _transcribe_audio(seg))
-        except: pass
-        finally: 
+    for i, seg in enumerate(segments):
+        try:
+            if callback: await callback(f"📝 正在转写第 {i+1}/{len(segments)} 段...")
+            # 分段后每段应该足够小，可以用 multimodal
+            seg_size = os.path.getsize(seg)
+            if seg_size <= MULTIMODAL_SIZE_LIMIT:
+                with open(seg, "rb") as f:
+                    seg_b64 = base64.b64encode(f.read()).decode()
+                text = await _chat(
+                    GEMINI_MODEL,
+                    [{"role": "user", "content": [
+                        {"type": "input_audio", "input_audio": {"data": seg_b64, "format": "mp3"}},
+                        {"type": "text", "text": "请完整转写这段音频为中文文本，不要遗漏任何内容。"}
+                    ]}],
+                    GEMINI_API_KEY, temperature=0.1, callback=callback
+                )
+            else:
+                # 极端情况：单段仍然太大，用 Whisper
+                text = await _transcribe_audio_whisper_only(seg)
+            parts.append(text)
+        except Exception as e:
+            logger.warning(f"[Stage1 大文件] 第 {i+1} 段转写失败: {e}")
+        finally:
             if os.path.exists(seg): os.remove(seg)
 
-    transcript = "\n".join(parts)
+    if not parts:
+        raise RuntimeError("[Stage1] 所有分段转写均失败")
+
+    transcript = "\n\n".join(parts)
     prompt = f"{_build_context(title, author, req)}\n\n转写文本:\n\n{transcript}"
     return await _chat(GEMINI_MODEL, [{"role": "system", "content": STAGE1_SYSTEM}, {"role": "user", "content": prompt}], GEMINI_API_KEY, callback=callback)
 
 
-async def _transcribe_audio(audio_path: str) -> str:
-    """Whisper API 转写"""
+async def _transcribe_audio_whisper_only(audio_path: str) -> str:
+    """Whisper API 转写 (不再 fallback 到 multimodal，避免循环)"""
     url = f"{API_BASE_URL}/audio/transcriptions"
     headers = {"Authorization": f"Bearer {GEMINI_API_KEY}"}
-    try:
-        async with httpx.AsyncClient(timeout=180) as client:
-            with open(audio_path, "rb") as f:
-                resp = await client.post(url, headers=headers, files={"file": (os.path.basename(audio_path), f, "audio/mpeg")}, data={"model": "whisper-1", "language": "zh"})
-                resp.raise_for_status()
-                return resp.text
-    except Exception:
-        # Fallback to Gemini Multimodal
-        with open(audio_path, "rb") as f: b64 = base64.b64encode(f.read()).decode()
-        return await _chat(GEMINI_MODEL, [{"role": "user", "content": [{"type": "input_audio", "input_audio": {"data": b64, "format": "mp3"}}, {"type": "text", "text": "转写为中文文本"}]}], GEMINI_API_KEY, temperature=0.1)
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        with open(audio_path, "rb") as f:
+            resp = await client.post(
+                url, headers=headers,
+                files={"file": (os.path.basename(audio_path), f, "audio/mpeg")},
+                data={"model": "whisper-1", "language": "zh"}
+            )
+            resp.raise_for_status()
+            return resp.text
+
+
+# 保留旧函数签名兼容性，但内部逻辑改了
+async def _transcribe_audio(audio_path: str) -> str:
+    """Whisper API 转写 (兼容旧调用)"""
+    return await _transcribe_audio_whisper_only(audio_path)
 
 
 # ======================== Stage 2: Qwen (Aliyun DashScope) ========================
@@ -328,3 +422,59 @@ def _build_context(title, author, requirement):
     if author: parts.append(f"作者：{author}")
     if requirement: parts.append(f"\n用户特别要求：{requirement}")
     return "\n".join(parts)
+
+
+# ======================== AI Tag Generation ========================
+
+TAG_SYSTEM_PROMPT = """你是一个知识标签分类专家。请为以下视频笔记生成检索标签。
+
+规则：
+1. 生成 5-10 个标签，用英文逗号分隔
+2. 采用自上而下策略：先给出大分类（如"AI编程"、"投资理财"），再给出具体主题
+3. 标签要简短（2-6个字），便于检索
+4. 只输出标签，不要解释，不要编号
+5. 标签之间用英文逗号分隔
+
+示例输出：AI编程,智能体,自我改进,强化学习,开源项目,LLM应用"""
+
+
+async def generate_tags_with_ai(summary_markdown: str, title: str = "",
+                                 author: str = "") -> str:
+    """调用 DeepSeek 为视频笔记生成语义化标签"""
+    from app.config import DEEPSEEK_API_KEY, DEEPSEEK_MODEL, DEEPSEEK_API_BASE
+
+    content = f"标题：{title}\n作者：{author}\n\n笔记内容：\n{summary_markdown}"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": TAG_SYSTEM_PROMPT},
+            {"role": "user", "content": content},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.1,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.post(
+                f"{DEEPSEEK_API_BASE}/chat/completions",
+                headers=headers, json=payload
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"]
+        # 清洗：去除可能的 # 前缀、多余空格、中文逗号
+        tags = ",".join(
+            t.strip().lstrip("#").strip()
+            for t in raw.replace("、", ",").replace("，", ",").split(",")
+            if t.strip()
+        )
+        logger.info(f"AI 标签生成完成: {tags[:80]}")
+        return tags
+    except Exception as e:
+        logger.warning(f"AI 标签生成失败，回退到正则提取: {e}")
+        from app.database.knowledge_store import extract_tags_from_markdown
+        return extract_tags_from_markdown(summary_markdown)
+

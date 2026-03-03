@@ -33,6 +33,11 @@ QWEN_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 SONNET_API_KEY = os.getenv("SONNET_API_KEY", "your_sonnet_api_key")
 SONNET_MODEL = os.getenv("SONNET_MODEL", "claude-sonnet-4-5-20250929-thinking")
 
+# 标签生成: DeepSeek
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com/v1")
+
 # ========================
 # 服务配置
 # ========================

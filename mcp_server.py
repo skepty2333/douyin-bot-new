@@ -27,13 +27,13 @@ mcp = FastMCP("douyin_knowledge_mcp", host="0.0.0.0", port=8090, transport_secur
 # ======================== Tool: Search ========================
 
 class SearchInput(BaseModel):
-    query: str = Field(..., description="搜索关键词，支持中文。")
-    limit: int = Field(default=5, description="返回结果数量上限")
+    query: str = Field(..., description="搜索关键词，支持中文。支持多个关键词空格分隔，将匹配标签、标题和正文。")
+    limit: int = Field(default=100, description="返回结果数量上限")
 
 
 @mcp.tool(name="search_notes")
 async def search_notes(params: SearchInput) -> str:
-    """在知识库中搜索视频笔记。"""
+    """在知识库中搜索视频笔记。优先匹配标签，也搜索标题和正文。多个关键词用空格分隔。"""
     results = store.search(params.query, params.limit)
     if not results:
         return f"未找到与 \"{params.query}\" 相关的笔记。"
@@ -41,14 +41,42 @@ async def search_notes(params: SearchInput) -> str:
     lines = [f"## 搜索结果: \"{params.query}\" ({len(results)} 条)\n"]
     for r in results:
         lines.append(
-            f"### [{r['id']}] {r['title']}\n"
+            f"### [{r['id']}] {r['title'][:60]}\n"
             f"- **视频码**: `{r['video_code']}`\n"
             f"- **作者**: {r['author']}\n"
-            f"- **标签**: {r['tags'][:100]}\n"
+            f"- **标签**: {r['tags'][:120]}\n"
             f"- **时间**: {r.get('timestamp') or r['created_at'][:19]}\n"
             f"- **摘要**: {r.get('snippet', '')[:200]}\n"
         )
-    lines.append("\n> 💡 使用 `get_note` (ID) 或 `get_note_by_code` (视频码) 获取完整内容。")
+    lines.append("\n> 使用 `get_note` (ID) 或 `get_note_by_code` (视频码) 获取完整内容。")
+    return "\n".join(lines)
+
+
+# ======================== Tool: Precise Search ========================
+
+class PreciseSearchInput(BaseModel):
+    query: str = Field(..., description="搜索关键词，空格分隔。所有关键词必须同时出现才会命中。")
+    limit: int = Field(default=20, description="返回结果数量上限")
+
+
+@mcp.tool(name="search_notes_precise")
+async def search_notes_precise(params: PreciseSearchInput) -> str:
+    """精确搜索：所有关键词必须同时出现在标签、标题或正文中（AND逻辑）。适合缩小范围、精确定位。"""
+    results = store.search_precise(params.query, params.limit)
+    if not results:
+        return f"未找到同时包含所有关键词 \"{params.query}\" 的笔记。"
+
+    lines = [f"## 精确搜索: \"{params.query}\" ({len(results)} 条)\n"]
+    for r in results:
+        lines.append(
+            f"### [{r['id']}] {r['title'][:60]}\n"
+            f"- **视频码**: `{r['video_code']}`\n"
+            f"- **作者**: {r['author']}\n"
+            f"- **标签**: {r['tags'][:120]}\n"
+            f"- **时间**: {r.get('timestamp') or r['created_at'][:19]}\n"
+            f"- **摘要**: {r.get('snippet', '')[:200]}\n"
+        )
+    lines.append("\n> 使用 `get_note` (ID) 或 `get_note_by_code` (视频码) 获取完整内容。")
     return "\n".join(lines)
 
 

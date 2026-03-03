@@ -162,36 +162,108 @@ class KnowledgeStore:
             conn.close()
 
     def search(self, query: str, limit: int = 10) -> List[dict]:
-        """全文搜索 (尝试 FTS5, 失败回退到 LIKE)"""
+        """宽松全文搜索：标签优先 + 多关键词 OR 匹配"""
         conn = self._get_conn()
         try:
-            # FTS5 搜索
-            rows = conn.execute(
-                """SELECT k.id, k.video_id, k.title, k.author, k.tags,
-                          k.source_url, k.created_at, k.duration_seconds, k.video_code, k.timestamp,
-                          snippet(knowledge_fts, 2, '**', '**', '...', 40) AS snippet
-                   FROM knowledge_fts fts
-                   JOIN knowledge k ON k.id = fts.rowid
-                   WHERE knowledge_fts MATCH ?
-                   ORDER BY rank
-                   LIMIT ?""",
-                (query, limit),
-            ).fetchall()
-            return [dict(r) for r in rows]
-        except Exception:
-            # 回退到 LIKE
-            like = f"%{query}%"
-            rows = conn.execute(
-                """SELECT id, video_id, title, author, tags,
-                          source_url, created_at, duration_seconds, video_code, timestamp,
-                          substr(summary_markdown, 1, 200) AS snippet
-                   FROM knowledge
-                   WHERE title LIKE ? OR author LIKE ?
-                      OR summary_markdown LIKE ? OR tags LIKE ?
-                   ORDER BY created_at DESC
-                   LIMIT ?""",
-                (like, like, like, like, limit),
-            ).fetchall()
+            results = []
+            seen_ids = set()
+
+            # 拆分关键词
+            keywords = [k.strip() for k in query.replace(",", " ").replace("，", " ").split() if k.strip()]
+            if not keywords:
+                keywords = [query.strip()]
+
+            # 策略1：标签精确匹配（优先级最高）
+            for kw in keywords:
+                rows = conn.execute(
+                    """SELECT id, video_id, title, author, tags,
+                              source_url, created_at, duration_seconds, video_code, timestamp,
+                              substr(summary_markdown, 1, 200) AS snippet
+                       FROM knowledge
+                       WHERE tags LIKE ?
+                       ORDER BY created_at DESC
+                       LIMIT ?""",
+                    (f"%{kw}%", limit),
+                ).fetchall()
+                for r in rows:
+                    d = dict(r)
+                    if d["id"] not in seen_ids:
+                        seen_ids.add(d["id"])
+                        results.append(d)
+
+            # 策略2：FTS5 全文搜索
+            if len(results) < limit:
+                try:
+                    fts_query = " OR ".join(keywords)
+                    rows = conn.execute(
+                        """SELECT k.id, k.video_id, k.title, k.author, k.tags,
+                                  k.source_url, k.created_at, k.duration_seconds, k.video_code, k.timestamp,
+                                  snippet(knowledge_fts, 2, '**', '**', '...', 40) AS snippet
+                           FROM knowledge_fts fts
+                           JOIN knowledge k ON k.id = fts.rowid
+                           WHERE knowledge_fts MATCH ?
+                           ORDER BY rank
+                           LIMIT ?""",
+                        (fts_query, limit),
+                    ).fetchall()
+                    for r in rows:
+                        d = dict(r)
+                        if d["id"] not in seen_ids:
+                            seen_ids.add(d["id"])
+                            results.append(d)
+                except Exception:
+                    pass
+
+            # 策略3：LIKE 兜底（标题 + 正文 + 标签）
+            if len(results) < limit:
+                for kw in keywords:
+                    like = f"%{kw}%"
+                    rows = conn.execute(
+                        """SELECT id, video_id, title, author, tags,
+                                  source_url, created_at, duration_seconds, video_code, timestamp,
+                                  substr(summary_markdown, 1, 200) AS snippet
+                           FROM knowledge
+                           WHERE title LIKE ? OR summary_markdown LIKE ? OR tags LIKE ?
+                           ORDER BY created_at DESC
+                           LIMIT ?""",
+                        (like, like, like, limit),
+                    ).fetchall()
+                    for r in rows:
+                        d = dict(r)
+                        if d["id"] not in seen_ids:
+                            seen_ids.add(d["id"])
+                            results.append(d)
+
+            return results[:limit]
+        finally:
+            conn.close()
+
+    def search_precise(self, query: str, limit: int = 20) -> List[dict]:
+        """精确搜索：所有关键词必须同时命中（AND 逻辑）"""
+        conn = self._get_conn()
+        try:
+            keywords = [k.strip() for k in query.replace(",", " ").replace("，", " ").split() if k.strip()]
+            if not keywords:
+                return []
+
+            # 构建 AND 条件：每个关键词都必须出现在 tags/title/summary 中
+            where_clauses = []
+            params = []
+            for kw in keywords:
+                like = f"%{kw}%"
+                where_clauses.append("(tags LIKE ? OR title LIKE ? OR summary_markdown LIKE ?)")
+                params.extend([like, like, like])
+
+            sql = f"""SELECT id, video_id, title, author, tags,
+                             source_url, created_at, duration_seconds, video_code, timestamp,
+                             substr(summary_markdown, 1, 200) AS snippet
+                      FROM knowledge
+                      WHERE {' AND '.join(where_clauses)}
+                      ORDER BY created_at DESC
+                      LIMIT ?"""
+            params.append(limit)
+
+            rows = conn.execute(sql, params).fetchall()
             return [dict(r) for r in rows]
         finally:
             conn.close()
