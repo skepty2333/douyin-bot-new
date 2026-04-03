@@ -111,24 +111,43 @@ async def resolve_and_download(share_url: str) -> dict:
     }
 
 
-async def _download_video(video_url: str, video_id: str) -> str:
-    """下载视频文件"""
+async def _download_video(video_url: str, video_id: str, max_retries: int = 3) -> str:
+    """下载视频文件 (带重试)"""
     video_path = os.path.join(TEMP_DIR, f"{video_id}.mp4")
     if os.path.exists(video_path) and os.path.getsize(video_path) > 1000:
         return video_path
 
-    logger.info(f"Downloading: {video_url[:60]}...")
-    async with httpx.AsyncClient(headers=MOBILE_HEADERS, follow_redirects=True, timeout=120) as client:
-        async with client.stream("GET", video_url) as resp:
-            resp.raise_for_status()
-            with open(video_path, "wb") as f:
-                async for chunk in resp.aiter_bytes(chunk_size=65536):
-                    f.write(chunk)
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            logger.info(f"Downloading (attempt {attempt}/{max_retries}): {video_url[:60]}...")
+            async with httpx.AsyncClient(headers=MOBILE_HEADERS, follow_redirects=True, timeout=120) as client:
+                async with client.stream("GET", video_url) as resp:
+                    resp.raise_for_status()
+                    with open(video_path, "wb") as f:
+                        async for chunk in resp.aiter_bytes(chunk_size=65536):
+                            f.write(chunk)
 
-    if os.path.getsize(video_path) < 1024*500:
-        logger.warning("下载文件过小，可能无效")
-        
-    return video_path
+            if os.path.getsize(video_path) < 1024 * 500:
+                logger.warning("下载文件过小，可能无效")
+
+            return video_path
+
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError, httpx.TimeoutException) as e:
+            last_error = e
+            logger.warning(f"下载失败 (attempt {attempt}/{max_retries}): {e}")
+            # 清理不完整的文件
+            if os.path.exists(video_path):
+                try:
+                    os.remove(video_path)
+                except OSError:
+                    pass
+            if attempt < max_retries:
+                wait = 2 ** attempt  # 2s, 4s, 8s
+                logger.info(f"等待 {wait}s 后重试...")
+                await asyncio.sleep(wait)
+
+    raise last_error
 
 
 def extract_audio(video_path: str) -> str:

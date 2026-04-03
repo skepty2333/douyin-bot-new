@@ -18,7 +18,7 @@ SECONDARY_API_BASE_URL = os.getenv("SECONDARY_API_BASE_URL", "https://api1.uiuia
 SECONDARY_GEMINI_API_KEY = os.getenv("SECONDARY_GEMINI_API_KEY", "")
 SECONDARY_GEMINI_MODEL = os.getenv("SECONDARY_GEMINI_MODEL", "gemini-3-pro-preview-thinking")
 SECONDARY_SONNET_API_KEY = os.getenv("SECONDARY_SONNET_API_KEY", "")
-SECONDARY_SONNET_MODEL = os.getenv("SECONDARY_SONNET_MODEL", "claude-sonnet-4-5-20250929-thinking")
+SECONDARY_SONNET_MODEL = os.getenv("SECONDARY_SONNET_MODEL", "claude-sonnet-4-6-thinking")
 
 # 阶段1: Gemini - 初始转写+总结
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "your_gemini_api_key")
@@ -31,7 +31,7 @@ QWEN_API_BASE = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
 # 阶段3: Sonnet 4.5 - 联网搜索 + 最终交付
 SONNET_API_KEY = os.getenv("SONNET_API_KEY", "your_sonnet_api_key")
-SONNET_MODEL = os.getenv("SONNET_MODEL", "claude-sonnet-4-5-20250929-thinking")
+SONNET_MODEL = os.getenv("SONNET_MODEL", "claude-sonnet-4-6-thinking")
 
 # 标签生成: DeepSeek
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")

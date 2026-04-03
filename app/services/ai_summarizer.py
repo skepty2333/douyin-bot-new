@@ -67,8 +67,34 @@ async def _chat(model, messages, api_key, max_tokens=8192, temperature=0.3, time
                 if callback: await callback("⚠️ 主线路持续限流，切换备用线路...")
                 return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
 
-            # 其他可重试状态码直接切副站
-            if status in (401, 403) or status >= 500 or (300 <= status < 400):
+            # 5xx 服务端错误: 先重试主站，再切副站
+            if status >= 500:
+                logger.warning(f"主站 {status} 服务端错误，尝试退避重试...")
+                if callback: await callback("⚠️ 主线路暂时不稳定，正在重试...")
+                for attempt in range(3):
+                    wait = (2 ** attempt) * 3  # 3s, 6s, 12s
+                    logger.info(f"{status} 退避等待 {wait}s (attempt {attempt + 1}/3)")
+                    await asyncio.sleep(wait)
+                    try:
+                        resp = await client.post(url, headers=headers, json=payload)
+                        resp.raise_for_status()
+                        logger.info(f"主站重试成功 (attempt {attempt + 1}/3)")
+                        return resp.json()["choices"][0]["message"]["content"]
+                    except httpx.HTTPStatusError as retry_e:
+                        if retry_e.response.status_code < 500:
+                            break  # 非5xx错误，跳出重试
+                        logger.warning(f"主站重试失败 ({retry_e.response.status_code}), attempt {attempt + 1}/3")
+                        continue
+                    except (httpx.ConnectError, httpx.TimeoutException, httpx.NetworkError):
+                        logger.warning(f"主站重试连接失败, attempt {attempt + 1}/3")
+                        continue
+                # 重试耗尽，切副站
+                logger.warning(f"主站 {status} 重试耗尽，切换副站")
+                if callback: await callback("⚠️ 主线路持续异常，正在切换备用线路...")
+                return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
+
+            # 其他客户端错误 (401, 403, 3xx) 直接切副站
+            if status in (401, 403) or (300 <= status < 400):
                 logger.warning(f"主站异常 ({status})，尝试切换副站: {e}")
                 if callback: await callback("⚠️ 主线路繁忙，正在切换备用线路...")
                 return await _chat_failover(model, messages, max_tokens, temperature, timeout, callback)
